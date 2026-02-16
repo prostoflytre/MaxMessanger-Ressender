@@ -2,3 +2,4 @@ maxapi-python
 pyTelegramBotAPI
 python-dotenv
 requests
+imagekitio

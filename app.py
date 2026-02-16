@@ -5,12 +5,19 @@ from typing import Iterable
 
 import requests
 from telebot import TeleBot
+from imagekitio import ImageKit
 
 from pymax import SocketMaxClient
 from pymax.crud import Database
 from pymax.payloads import UserAgentPayload
 from pymax.types import PhotoAttach, VideoAttach
 from dotenv import load_dotenv
+
+
+def debug_log(message: str) -> None:
+    enabled = os.getenv("MAX_DEBUG", "true").lower() in {"1", "true", "yes"}
+    if enabled:
+        print(f"[MaxRessend] {message}")
 
 
 def get_env(name: str, required: bool = True, default: str | None = None) -> str | None:
@@ -92,12 +99,204 @@ def get_user_display_name(user: object | None) -> str | None:
 
 
 def download_file(url: str, destination: str) -> None:
+    debug_log(f"download_file start url={url} destination={destination}")
     response = requests.get(url, stream=True, timeout=30)
     response.raise_for_status()
     with open(destination, "wb") as file:
         for chunk in response.iter_content(chunk_size=1024 * 256):
             if chunk:
                 file.write(chunk)
+    debug_log(f"download_file done destination={destination}")
+
+
+def upload_file_to_imagekit(file_path: str, file_name: str) -> str | None:
+    private_key = os.getenv("IMAGEKIT_PRIVATE_KEY", "").strip()
+    imagekit_folder = os.getenv("IMAGEKIT_FOLDER", "/max-messenger")
+
+    if not private_key:
+        debug_log("upload_file_to_imagekit skipped: IMAGEKIT_PRIVATE_KEY is empty")
+        return None
+
+    imagekit = ImageKit(
+        private_key=private_key,
+    )
+
+    with open(file_path, "rb") as file:
+        debug_log(f"upload_file_to_imagekit start file_name={file_name}")
+        response = imagekit.files.upload(
+            file=file,
+            file_name=file_name,
+            folder=imagekit_folder,
+            use_unique_file_name=True,
+        )
+
+    if isinstance(response, dict):
+        uploaded_url = response.get("url")
+        debug_log(f"upload_file_to_imagekit done url={uploaded_url}")
+        return uploaded_url
+    uploaded_url = getattr(response, "url", None)
+    debug_log(f"upload_file_to_imagekit done url={uploaded_url}")
+    return uploaded_url
+
+
+def get_media_sources(message: object) -> list[tuple[str, object]]:
+    sources: list[tuple[str, object]] = [("", message)]
+    link = getattr(message, "link", None)
+    forwarded_message = getattr(link, "message", None) if link else None
+    if forwarded_message is not None:
+        sources.append(("forwarded", forwarded_message))
+    return sources
+
+
+def _unique_positive_ints(values: Iterable[object]) -> list[int]:
+    result: list[int] = []
+    for value in values:
+        if isinstance(value, int) and value > 0 and value not in result:
+            result.append(value)
+    return result
+
+
+async def resolve_video_url(
+    client: SocketMaxClient,
+    parent_message: object,
+    source_message: object,
+    video_id: int,
+) -> str | None:
+    link = getattr(parent_message, "link", None)
+    linked_message = getattr(link, "message", None) if link else None
+
+    chat_ids = _unique_positive_ints(
+        [
+            getattr(source_message, "chat_id", None),
+            getattr(source_message, "cid", None),
+            getattr(link, "chat_id", None),
+            getattr(parent_message, "chat_id", None),
+        ]
+    )
+    message_ids = _unique_positive_ints(
+        [
+            getattr(source_message, "id", None),
+            getattr(linked_message, "id", None),
+            getattr(parent_message, "id", None),
+        ]
+    )
+
+    for chat_id_candidate in chat_ids:
+        for message_id_candidate in message_ids:
+            try:
+                video = await client.get_video_by_id(
+                    chat_id=chat_id_candidate,
+                    message_id=message_id_candidate,
+                    video_id=video_id,
+                )
+                if video and video.url:
+                    return video.url
+            except Exception:
+                continue
+
+    return None
+
+
+async def process_media_source(
+    client: SocketMaxClient,
+    parent_message: object,
+    source_message: object,
+    source_label: str,
+    bot: TeleBot,
+    chat_id: str,
+    media_dir: str,
+) -> None:
+    attaches = getattr(source_message, "attaches", None) or []
+    if not attaches:
+        debug_log(f"process_media_source no attaches source={source_label or 'main'}")
+        return
+
+    debug_log(
+        f"process_media_source start source={source_label or 'main'} attaches={len(attaches)} message_id={getattr(source_message, 'id', None)}"
+    )
+
+    for attach in attaches:
+        media_kind = ""
+        source_url: str | None = None
+        filename = ""
+
+        if isinstance(attach, PhotoAttach):
+            source_url = attach.base_url
+            if not source_url:
+                continue
+            media_kind = "photo"
+            filename = f"photo_{getattr(source_message, 'id', 'unknown')}_{attach.photo_id}.jpg"
+        elif isinstance(attach, VideoAttach):
+            source_url = await resolve_video_url(
+                client=client,
+                parent_message=parent_message,
+                source_message=source_message,
+                video_id=attach.video_id,
+            )
+            if not source_url and getattr(attach, "thumbnail", None):
+                source_url = attach.thumbnail
+                media_kind = "video-preview"
+                filename = (
+                    f"video_preview_{getattr(source_message, 'id', 'unknown')}_{attach.video_id}.jpg"
+                )
+            if not source_url:
+                await asyncio.to_thread(
+                    bot.send_message,
+                    chat_id,
+                    f"MAX video не удалось получить (id={attach.video_id}) в этом контексте сообщения.",
+                )
+                continue
+            if media_kind != "video-preview":
+                media_kind = "video"
+                filename = f"video_{getattr(source_message, 'id', 'unknown')}_{attach.video_id}.mp4"
+
+        if not filename:
+            debug_log("process_media_source skip: empty filename")
+            continue
+
+        if not source_url:
+            debug_log(f"process_media_source skip: no source_url kind={media_kind}")
+            continue
+
+        path = os.path.join(media_dir, filename)
+        try:
+            debug_log(f"process_media_source download by url kind={media_kind} path={path}")
+            await asyncio.to_thread(download_file, source_url, path)
+
+            try:
+                debug_log(f"process_media_source upload to imagekit path={path}")
+                hosted_url = await asyncio.to_thread(upload_file_to_imagekit, path, filename)
+            except Exception as upload_error:
+                debug_log(f"process_media_source imagekit error: {upload_error}")
+                await asyncio.to_thread(
+                    bot.send_message,
+                    chat_id,
+                    f"Ошибка загрузки MAX {media_kind} в ImageKit: {upload_error}",
+                )
+                hosted_url = None
+
+            source_prefix = "forwarded " if source_label == "forwarded" else ""
+            if hosted_url:
+                debug_log(f"process_media_source send telegram link url={hosted_url}")
+                await asyncio.to_thread(
+                    bot.send_message,
+                    chat_id,
+                    f"MAX {source_prefix}{media_kind} link: {hosted_url}",
+                )
+            else:
+                debug_log(f"process_media_source no hosted url, local path={path}")
+                await asyncio.to_thread(
+                    bot.send_message,
+                    chat_id,
+                    (
+                        f"MAX {source_prefix}{media_kind} получен, но не задан IMAGEKIT_PRIVATE_KEY. "
+                        f"Файл сохранён локально: {path}"
+                    ),
+                )
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+                debug_log(f"process_media_source local file removed path={path}")
 
 
 async def save_and_send_media(
@@ -107,35 +306,24 @@ async def save_and_send_media(
     chat_id: str,
     media_dir: str,
 ) -> None:
-    attaches = getattr(message, "attaches", None) or []
-    if not attaches:
-        return
-
     os.makedirs(media_dir, exist_ok=True)
-
-    for attach in attaches:
-        if isinstance(attach, PhotoAttach):
-            url = attach.base_url
-            if not url:
-                continue
-            filename = f"photo_{getattr(message, 'id', 'unknown')}_{attach.photo_id}.jpg"
-            path = os.path.join(media_dir, filename)
-            await asyncio.to_thread(download_file, url, path)
-            await asyncio.to_thread(lambda: bot.send_photo(chat_id, open(path, "rb")))
-            os.remove(path)
-        elif isinstance(attach, VideoAttach):
-            video = await client.get_video_by_id(
-                chat_id=getattr(message, "chat_id", 0),
-                message_id=getattr(message, "id", 0),
-                video_id=attach.video_id,
+    for source_label, source_message in get_media_sources(message):
+        try:
+            await process_media_source(
+                client=client,
+                parent_message=message,
+                source_message=source_message,
+                source_label=source_label,
+                bot=bot,
+                chat_id=chat_id,
+                media_dir=media_dir,
             )
-            if not video or not video.url:
-                continue
-            filename = f"video_{getattr(message, 'id', 'unknown')}_{attach.video_id}.mp4"
-            path = os.path.join(media_dir, filename)
-            await asyncio.to_thread(download_file, video.url, path)
-            await asyncio.to_thread(lambda: bot.send_video(chat_id, open(path, "rb")))
-            os.remove(path)
+        except Exception as media_error:
+            await asyncio.to_thread(
+                bot.send_message,
+                chat_id,
+                f"Ошибка обработки MAX media: {media_error}",
+            )
 
 
 async def main() -> None:
