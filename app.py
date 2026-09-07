@@ -13,13 +13,34 @@ from pymax.payloads import UserAgentPayload
 from pymax.types import PhotoAttach, VideoAttach
 from dotenv import load_dotenv
 
+# Create Client and start it
+def build_client() -> SocketMaxClient:
+    phone = get_env("MAX_PHONE")
+    session_name = os.getenv("MAX_SESSION", "session.db")
+    token = os.getenv("MAX_TOKEN")
+    work_dir = os.getenv("MAX_WORK_DIR", ".")
+    device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
+    app_version = os.getenv("MAX_APP_VERSION", "25.12.13")
 
+    ua = UserAgentPayload(device_type=device_type, app_version=app_version)
+
+    client = SocketMaxClient(
+        phone=phone,
+        session_name=session_name,
+        token=token,
+        work_dir=work_dir,
+        headers=ua,
+    )
+
+    return client
+
+# Output in console
 def debug_log(message: str) -> None:
     enabled = os.getenv("MAX_DEBUG", "true").lower() in {"1", "true", "yes"}
     if enabled:
         print(f"[MaxRessend] {message}")
 
-
+# get env data, with output in console if missing
 def get_env(name: str, required: bool = True, default: str | None = None) -> str | None:
     value = os.getenv(name, default)
     if required and not value:
@@ -27,7 +48,7 @@ def get_env(name: str, required: bool = True, default: str | None = None) -> str
         sys.exit(2)
     return value
 
-
+# func of getting attaches in a dict of their counts
 def summarize_attaches(attaches: Iterable[object] | None) -> str:
     if not attaches:
         return ""
@@ -38,7 +59,7 @@ def summarize_attaches(attaches: Iterable[object] | None) -> str:
     items = ", ".join(f"{k} x{v}" for k, v in counts.items())
     return f"\n\nAttachments: {items}"
 
-
+# get message info as a formatted string with reaction info
 def format_message_details(message: object, sender_name: str | None = None) -> str:
     def safe_get(name: str) -> str:
         value = getattr(message, name, None)
@@ -56,35 +77,16 @@ def format_message_details(message: object, sender_name: str | None = None) -> s
     return "\n".join(lines)
 
 
-def build_client() -> SocketMaxClient:
-    phone = get_env("MAX_PHONE")
-    session_name = os.getenv("MAX_SESSION", "session.db")
-    token = os.getenv("MAX_TOKEN")
-    work_dir = os.getenv("MAX_WORK_DIR", ".")
-    device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
-    app_version = os.getenv("MAX_APP_VERSION", "25.12.13")
-    force_code = os.getenv("MAX_FORCE_CODE", "false").lower() in {"1", "true", "yes"}
-
-    ua = UserAgentPayload(device_type=device_type, app_version=app_version)
-
-    client = SocketMaxClient(
-        phone=phone,
-        session_name=session_name,
-        token=token,
-        work_dir=work_dir,
-        headers=ua,
-    )
-
-    return client
 
 
+# get session token from the database
 def get_session_token(work_dir: str) -> str | None:
     try:
         return Database(work_dir).get_auth_token()
     except Exception:
         return None
 
-
+# get user display name from message
 def get_user_display_name(user: object | None) -> str | None:
     if not user:
         return None
@@ -94,21 +96,22 @@ def get_user_display_name(user: object | None) -> str | None:
     name = names[0]
     first_name = getattr(name, "first_name", None)
     last_name = getattr(name, "last_name", None)
-    full = " ".join(part for part in [first_name, last_name] if part)
+    # Combine first and last name if not None, false or empty
+    full = " ".join(part for part in [first_name, last_name] if part) 
     return full or getattr(name, "name", None)
 
-
+# download file from url to destination
 def download_file(url: str, destination: str) -> None:
     debug_log(f"download_file start url={url} destination={destination}")
     response = requests.get(url, stream=True, timeout=30)
-    response.raise_for_status()
+    response.raise_for_status() # get a exception if the request failed
     with open(destination, "wb") as file:
-        for chunk in response.iter_content(chunk_size=1024 * 256):
+        for chunk in response.iter_content(chunk_size=1024 * 256): # read in 256 KB chunks
             if chunk:
                 file.write(chunk)
     debug_log(f"download_file done destination={destination}")
 
-
+# upload file to ImageKit and return the uploaded URL
 def upload_file_to_imagekit(file_path: str, file_name: str) -> str | None:
     private_key = os.getenv("IMAGEKIT_PRIVATE_KEY", "").strip()
     imagekit_folder = os.getenv("IMAGEKIT_FOLDER", "/max-messenger")
@@ -138,7 +141,7 @@ def upload_file_to_imagekit(file_path: str, file_name: str) -> str | None:
     debug_log(f"upload_file_to_imagekit done url={uploaded_url}")
     return uploaded_url
 
-
+# get link to media sources from a Max message, including forwarded messages 
 def get_media_sources(message: object) -> list[tuple[str, object]]:
     sources: list[tuple[str, object]] = [("", message)]
     link = getattr(message, "link", None)
@@ -147,7 +150,7 @@ def get_media_sources(message: object) -> list[tuple[str, object]]:
         sources.append(("forwarded", forwarded_message))
     return sources
 
-
+# get list of id values that are positive integers and unique
 def _unique_positive_ints(values: Iterable[object]) -> list[int]:
     result: list[int] = []
     for value in values:
@@ -155,13 +158,15 @@ def _unique_positive_ints(values: Iterable[object]) -> list[int]:
             result.append(value)
     return result
 
-
+# Get video URL from a Max message by resolving video ID
 async def resolve_video_url(
     client: SocketMaxClient,
     parent_message: object,
     source_message: object,
     video_id: int,
 ) -> str | None:
+
+    # Extract link and linked message from the parent message
     link = getattr(parent_message, "link", None)
     linked_message = getattr(link, "message", None) if link else None
 
@@ -196,7 +201,7 @@ async def resolve_video_url(
 
     return None
 
-
+# Process media from Max and 
 async def process_media_source(
     client: SocketMaxClient,
     parent_message: object,
@@ -225,7 +230,7 @@ async def process_media_source(
             if not source_url:
                 continue
             media_kind = "photo"
-            filename = f"photo_{getattr(source_message, 'id', 'unknown')}_{attach.photo_id}.jpg"
+            filename = f"photo_{getattr(source_message, 'id', 'unknown')}_{attach.photo_id}.jpg" # save photo with message ID and photo ID
         elif isinstance(attach, VideoAttach):
             source_url = await resolve_video_url(
                 client=client,
@@ -233,6 +238,7 @@ async def process_media_source(
                 source_message=source_message,
                 video_id=attach.video_id,
             )
+            # If video URL could not be resolved, try using the thumbnail as a preview
             if not source_url and getattr(attach, "thumbnail", None):
                 source_url = attach.thumbnail
                 media_kind = "video-preview"
@@ -246,7 +252,7 @@ async def process_media_source(
                     f"MAX video не удалось получить (id={attach.video_id}) в этом контексте сообщения.",
                 )
                 continue
-            if media_kind != "video-preview":
+            if media_kind != "video-preview": # Only set as video if it's not a preview
                 media_kind = "video"
                 filename = f"video_{getattr(source_message, 'id', 'unknown')}_{attach.video_id}.mp4"
 
