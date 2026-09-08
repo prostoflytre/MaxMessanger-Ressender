@@ -2,34 +2,29 @@ import asyncio
 import os
 import sys
 from typing import Iterable
+from pymax import Client
 
 import requests
 from telebot import TeleBot
 from imagekitio import ImageKit
 
-from pymax import SocketMaxClient
-from pymax.crud import Database
-from pymax.payloads import UserAgentPayload
-from pymax.types import PhotoAttach, VideoAttach
+from pymax import ExtraConfig
+from pymax.types import PhotoAttachment, VideoAttachment
 from dotenv import load_dotenv
 
 # Create Client and start it
-def build_client() -> SocketMaxClient:
+def build_client() -> Client:
     phone = get_env("MAX_PHONE")
     session_name = os.getenv("MAX_SESSION", "session.db")
     token = os.getenv("MAX_TOKEN")
     work_dir = os.getenv("MAX_WORK_DIR", ".")
     device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
-    app_version = os.getenv("MAX_APP_VERSION", "25.12.13")
 
-    ua = UserAgentPayload(device_type=device_type, app_version=app_version)
-
-    client = SocketMaxClient(
+    client = Client(
         phone=phone,
         session_name=session_name,
-        token=token,
         work_dir=work_dir,
-        headers=ua,
+        extra_config=ExtraConfig(token=token, device_type=device_type),
     )
 
     return client
@@ -78,13 +73,6 @@ def format_message_details(message: object, sender_name: str | None = None) -> s
 
 
 
-
-# get session token from the database
-def get_session_token(work_dir: str) -> str | None:
-    try:
-        return Database(work_dir).get_auth_token()
-    except Exception:
-        return None
 
 # get user display name from message
 def get_user_display_name(user: object | None) -> str | None:
@@ -160,7 +148,7 @@ def _unique_positive_ints(values: Iterable[object]) -> list[int]:
 
 # Get video URL from a Max message by resolving video ID
 async def resolve_video_url(
-    client: SocketMaxClient,
+    client: Client,
     parent_message: object,
     source_message: object,
     video_id: int,
@@ -201,9 +189,9 @@ async def resolve_video_url(
 
     return None
 
-# Process media from Max and 
+# Process media from Max and create ImageKit uploads
 async def process_media_source(
-    client: SocketMaxClient,
+    client: Client,
     parent_message: object,
     source_message: object,
     source_label: str,
@@ -224,14 +212,13 @@ async def process_media_source(
         media_kind = ""
         source_url: str | None = None
         filename = ""
-
-        if isinstance(attach, PhotoAttach):
+        if isinstance(attach, PhotoAttachment):
             source_url = attach.base_url
             if not source_url:
                 continue
             media_kind = "photo"
             filename = f"photo_{getattr(source_message, 'id', 'unknown')}_{attach.photo_id}.jpg" # save photo with message ID and photo ID
-        elif isinstance(attach, VideoAttach):
+        elif isinstance(attach, VideoAttachment):
             source_url = await resolve_video_url(
                 client=client,
                 parent_message=parent_message,
@@ -264,6 +251,7 @@ async def process_media_source(
             debug_log(f"process_media_source skip: no source_url kind={media_kind}")
             continue
 
+        # start of download media and upload to ImageKit process
         path = os.path.join(media_dir, filename)
         try:
             debug_log(f"process_media_source download by url kind={media_kind} path={path}")
@@ -302,11 +290,11 @@ async def process_media_source(
         finally:
             if os.path.exists(path):
                 os.remove(path)
-                debug_log(f"process_media_source local file removed path={path}")
+                debug_log(f"process_media_source local file removed path={path}") # delete local file after processing
 
-
+# Save media locally and send it via Telegram, optionally uploading to ImageKit
 async def save_and_send_media(
-    client: SocketMaxClient,
+    client: Client,
     message: object,
     bot: TeleBot,
     chat_id: str,
@@ -331,35 +319,20 @@ async def save_and_send_media(
                 f"Ошибка обработки MAX media: {media_error}",
             )
 
-
+# Entry point for the application
 async def main() -> None:
     load_dotenv()
     bot_token = get_env("TELEGRAM_BOT_TOKEN")
     chat_id = get_env("TELEGRAM_CHAT_ID")
     bot = TeleBot(bot_token)
     source_chat_title = os.getenv("MAX_SOURCE_CHAT_TITLE", "").strip()
-    source_chat_id_env = os.getenv("MAX_SOURCE_CHAT_ID", "").strip()
-    source_chat_id: int | None = None
+    source_chat_id: int | None = os.getenv("MAX_SOURCE_CHAT_ID")
 
     client = build_client()
 
-    work_dir = os.getenv("MAX_WORK_DIR", ".")
-    session_path = os.path.join(work_dir, os.getenv("MAX_SESSION", "session.db"))
-    has_session = os.path.exists(session_path)
-    session_token = get_session_token(work_dir) if has_session else None
-    has_session_token = bool(session_token)
-    force_code = os.getenv("MAX_FORCE_CODE", "false").lower() in {"1", "true", "yes"}
-
-    if force_code or (not os.getenv("MAX_TOKEN") and not has_session_token):
-        language = os.getenv("MAX_LANGUAGE", "ru")
-        if not getattr(client, "is_connected", False):
-            await client.connect()
-        temp_token = await client.request_code(phone=client.phone, language=language)
-        code = input("Enter MAX verification code: ").strip()
-        await client.login_with_code(temp_token=temp_token, code=code, start=False)
-
-    @client.on_start
-    async def on_start() -> None:
+    # Event handler for when the client starts
+    @client.on_start()
+    async def on_start(client: Client) -> None:
         nonlocal source_chat_id
         if source_chat_title:
             for chat in client.chats:
@@ -368,19 +341,19 @@ async def main() -> None:
                     break
             if source_chat_id is None:
                 print(f"MAX_SOURCE_CHAT_TITLE not found: {source_chat_title}")
-
-        if source_chat_id is None and source_chat_id_env:
-            try:
-                source_chat_id = int(source_chat_id_env)
-            except ValueError:
-                print("MAX_SOURCE_CHAT_ID must be a number")
+            else:
+                try:
+                    source_chat_id = int(source_chat_id)
+                except ValueError:
+                    print("MAX_SOURCE_CHAT_ID must be a number")
 
     @client.on_message()
-    async def handle_message(message):
+    async def handle_message(message, client: Client) -> None:
+        # Ignore messages from chats other than the source chat
         if source_chat_id is not None and message.chat_id != source_chat_id:
             return
         sender_name = None
-        if message.sender:
+        if message.sender: # if the message has a sender get the user details
             user = await client.get_user(message.sender)
             sender_name = get_user_display_name(user)
         text = message.text or ""
