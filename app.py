@@ -12,22 +12,7 @@ from pymax import ExtraConfig
 from pymax.types import PhotoAttachment, VideoAttachment
 from dotenv import load_dotenv
 
-# Create Client and start it
-def build_client() -> Client:
-    phone = get_env("MAX_PHONE")
-    session_name = os.getenv("MAX_SESSION", "session.db")
-    token = os.getenv("MAX_TOKEN")
-    work_dir = os.getenv("MAX_WORK_DIR", ".")
-    device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
-
-    client = Client(
-        phone=phone,
-        session_name=session_name,
-        work_dir=work_dir,
-        extra_config=ExtraConfig(token=token, device_type=device_type),
-    )
-
-    return client
+from channel_to_bot import send_to_telegram
 
 # Output in console
 def debug_log(message: str) -> None:
@@ -319,6 +304,24 @@ async def save_and_send_media(
                 f"Ошибка обработки MAX media: {media_error}",
             )
 
+# Create Client and start it
+def build_client() -> Client:
+    phone = get_env("MAX_PHONE")
+    session_name = os.getenv("MAX_SESSION", "session.db")
+    token = os.getenv("MAX_TOKEN")
+    work_dir = os.getenv("MAX_WORK_DIR", ".")
+    device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
+
+    client = Client(
+        phone=phone,
+        session_name=session_name,
+        work_dir=work_dir,
+        extra_config=ExtraConfig(token=token, device_type=device_type),
+    )
+
+    return client
+
+
 # Entry point for the application
 async def main() -> None:
     load_dotenv()
@@ -359,7 +362,7 @@ async def main() -> None:
         text = message.text or ""
         summary = f"{format_message_details(message, sender_name)}\nText: {text}"
         summary += summarize_attaches(message.attaches)
-        await asyncio.to_thread(bot.send_message, chat_id, summary)
+        await send_to_telegram(summary)
         await save_and_send_media(client, message, bot, chat_id, os.getenv("MAX_MEDIA_DIR", "media"))
 
     await client.start()

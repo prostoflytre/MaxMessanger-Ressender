@@ -3,3 +3,4 @@ pyTelegramBotAPI
 python-dotenv
 requests
 imagekitio
+redis>=8.1.0
