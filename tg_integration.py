@@ -48,15 +48,19 @@ async def send_message_from_tg(chat_recipient: str, media: dict | None, text: st
                 if key == "photo":
                     media_file = Photo(path=Path(value))
                     await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    Path(value).unlink(missing_ok=True)
                 elif key == "video":
                     media_file = Video(path=Path(value))
                     await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    Path(value).unlink(missing_ok=True)
                 elif key == "document":
                     media_file = File(path=Path(value))
                     await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    Path(value).unlink(missing_ok=True)
                 elif key == "voice":
                     media_file = Voice(path=Path(value))
                     await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    Path(value).unlink(missing_ok=True)
             if len(text) > 0:
                 await client.send_message(chat_id=chat.id, text=text)
             debug_log(f"Sent message to chat {chat_recipient}")
