@@ -1,7 +1,8 @@
-maxapi-python>=2.4.1
+maxapi-python[video]>=2.4.1
 pyTelegramBotAPI
 python-dotenv
 requests
+certifi
 imagekitio
 redis>=8.1.0
 psycopg-pool>=3.2.4

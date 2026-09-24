@@ -1,65 +1,163 @@
 import asyncio
-import os
+import json
+import os, gzip
 import sys
-from typing import Iterable
-from pymax import Client
+from pymax import Client, Message
 import logging
 
-import requests
-
+import ssl
+from pathlib import Path
+import aiohttp
+import aiohttp.connector as _aiohttp_connector
+import certifi
 from pymax import ExtraConfig
-from pymax.types import PhotoAttachment, VideoAttachment
+from pymax.types import PhotoAttachment, VideoAttachment, AudioAttachment, StickerAttachment, FileAttachment
 from dotenv import load_dotenv
+from debug import debug_log
+
 
 from channel_to_bot import get_tg_message, send_to_telegram
 
-# Output in console
-def debug_log(message: str) -> None:
-    enabled = os.getenv("MAX_DEBUG", "true").lower() in {"1", "true", "yes"}
-    if enabled:
-        print(f"[MaxRessend] {message}")
+# aiohttp builds its default SSL context from the Windows cert store at import time,
+# which can lack the CA chain for some hosts (e.g. omu.okcdn.ru) and raise
+# CERTIFICATE_VERIFY_FAILED. Force it to use certifi's bundle instead, since pymax
+# creates its own aiohttp.ClientSession() internally with no way to inject ssl=.
+_aiohttp_connector._SSL_CONTEXT_VERIFIED = ssl.create_default_context(cafile=certifi.where())
+
 
 # get env data, with output in console if missing
 def get_env(name: str, required: bool = True, default: str | None = None) -> str | None:
     value = os.getenv(name, default)
     if required and not value:
-        print(f"Missing required env var: {name}, check .env file")
+        debug_log(f"Missing required env var: {name}, check .env file")
         sys.exit(2)
     return value
 
-# get message info as a formatted string with reaction info
-def format_message_details(message: object, sender_name: str | None = None, id: str | None = None) -> str:
-    def safe_get(name: str) -> str:
-        value = getattr(message, name, None)
-        return "" if value is None else str(value)
+async def download_url(url: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    fields = {
-        "Отправитель": sender_name or "",
-        "ID": id,
-        "Reaction": safe_get("reactionInfo"),
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, allow_redirects=True) as response:
+            response.raise_for_status()
+
+            with destination.open("wb") as file:
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    file.write(chunk)
+
+    debug_log(f"Saved: {destination}")
+
+async def download_message_attachments(
+    message: Message,
+    client: Client,
+    output_dir: str = "downloads",
+) -> dict:
+    if message.chat_id is None:
+        debug_log("У сообщения нет chat_id — получить URL видео/файла нельзя.")
+        return {}
+
+    folder = Path(output_dir)
+    folder.mkdir(parents=True, exist_ok=True)  # Added to ensure output directory exists
+    
+    attach_list = [attach for attach in message.attaches]
+    
+    # Initialize keys as lists so we can append multiple attachments of the same type
+    path_list = {
+        "photo": [],
+        "audio": [],
+        "sticker": [],
+        "sticker_emoji": [],
+        "video": [],
+        "file": []
     }
 
-    lines = ["MAX message"]
-    for label, value in fields.items():
-        if value:
-            lines.append(f"{label}: {value}")
-    return "\n".join(lines)
+    for index, attach in enumerate(attach_list):
+        # Photo handler
+        if isinstance(attach, PhotoAttachment):
+            path = folder / f"photo_{attach.photo_id}.jpg"
+            debug_log(f"Downloading photo {attach.photo_id}: {attach.base_url}")
+            await download_url(attach.base_url, path)
+            path_list["photo"].append(str(path.resolve()))
+
+        # Audio handler
+        elif isinstance(attach, AudioAttachment):
+            path = folder / f"audio_{attach.audio_id}.ogg"
+            debug_log(f"Downloading audio {attach.audio_id}: {attach.url}")
+            await download_url(attach.url, path)
+            path_list["audio"].append(str(path.resolve()))
+
+        # Sticker handler
+        elif isinstance(attach, StickerAttachment):
+            if attach.lottie_url is not None:
+                path = folder / f"sticker_{attach.sticker_id}.tgs"
+                debug_log(f"Downloading sticker {attach.sticker_id}: {attach.lottie_url}")
+                await download_url(attach.lottie_url, path)
+                
+                try:
+                    with open(path, "rb") as f_in:
+                        file_content = f_in.read()
+                    if not file_content.startswith(b"\x1f\x8b"):
+                        debug_log(f"File {path} is not a valid gzip file.")
+                        with gzip.open(path, "wb") as f_out:
+                            f_out.write(file_content)
+                except Exception as e:
+                    debug_log(f"Failed to compress sticker {attach.sticker_id}: {e}")
+                
+                path_list["sticker"].append(str(path.resolve()))
+            else:
+                sticker = "".join([emoji for emoji in attach.tags])
+                path_list["sticker_emoji"].append(sticker)
+                debug_log(f"Sticker without lottie_url: {sticker}")
+
+        # Video handler
+        elif isinstance(attach, VideoAttachment):
+            video_info = await client.get_video_by_id(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                video_id=attach.video_id,
+            )
+            if video_info is None:
+                debug_log(f"Video URL was not returned for video_id={attach.video_id}")
+                continue
+            if video_info.url:
+                path = folder / f"video_{attach.video_id}.mp4"
+                debug_log(f"Downloading video {attach.video_id}: {video_info.url}")
+                await download_url(video_info.url, path)
+                path_list["video"].append(str(path.resolve()))
+            elif video_info.external:
+                debug_log(f"Video {attach.video_id} is external; source: {video_info.external}")
+
+        # File handler
+        elif isinstance(attach, FileAttachment):
+            file_info = await client.get_file_by_id(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                file_id=attach.file_id,
+            )
+            if file_info is None:
+                debug_log(f"File URL was not returned for file_id={attach.file_id}")
+                continue
+            
+            filename = Path(attach.name).name or f"file_{attach.file_id}"
+            path = folder / filename
+            debug_log(f"Downloading file {attach.file_id}: {file_info.url}")
+            await download_url(file_info.url, path)
+            path_list["file"].append(str(path.resolve()))
+
+    # Optional: Clean up empty lists from the response dictionary
+    return {key: value for key, value in path_list.items() if value}
+
 
 # get user display name from message
-def get_user_display_name(user: object | None) -> str | None:
+def get_user_display_name(user: object | None) -> str:
     if not user:
-        return None
-    names = getattr(user, "names", None)
-    if not names:
-        return None
-    name = names[0]
-    print(f"Name object: {name}")
-    first_name = getattr(name, "first_name", None)
-    last_name = getattr(name, "last_name", None)
-    id = getattr(name, "id", None)
-    # Combine first and last name if not None, false or empty
-    full = " ".join(part for part in [first_name, last_name, id] if part) 
-    return full or getattr(name, "name", None)
+        return ""
+    for name in user.names:
+        if name.name:
+            return name.name
+        parts = [p for p in (name.first_name, name.last_name) if p]
+        if parts:
+            return " ".join(parts)
+    return ""
 
 
 # Create Client and start it
@@ -80,8 +178,6 @@ def build_client() -> Client:
     return client
 
 
-
-
 # Entry point for the application
 async def main() -> None:
 
@@ -93,7 +189,6 @@ async def main() -> None:
     chat_id = get_env("TELEGRAM_CHAT_ID")
     bot = TeleBot(bot_token)
     """
-
 
     client = build_client()
 
@@ -119,23 +214,28 @@ async def main() -> None:
         tg_message_task.add_done_callback(_background_tasks.discard)
 
 
-
     @client.on_message()
-    async def handle_message(message, client: Client) -> None:
+    async def handle_message(message: Message, client: Client) -> None:
         sender_name = None
         if message.sender: # if the message has a sender get the user details
             user = await client.get_user(message.sender)
             sender_name = get_user_display_name(user)
         text = message.text or ""
-        summary = f"{format_message_details(message, sender_name, id=message.sender)}\nText: {text}"
+        summary = {
+            "message": str(message),
+            "sender": sender_name,
+            "id": message.sender,
+            "text": text
+        }
+        if message.attaches:
+            media : dict = await download_message_attachments(message=message, client=client)
+            summary.update({"media": media})
+        summary = json.dumps(summary, ensure_ascii=False)
         await send_to_telegram(summary)
 
 
 
     await client.start()
-
-
-
     await client.idle()
 
 

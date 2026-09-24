@@ -1,16 +1,65 @@
-from pymax import Client
+from pathlib import Path
+from pymax import Client, Photo, Video, File, Voice
 
-async def send_message_from_tg(chat_recipient: str, message: str, client: Client) -> None:
+from debug import debug_log
 
+def _get_name(user) -> list[str]:
+    names = []
+    if user is None:
+        return names
+    for name in user.names:
+        if name.name:
+            names.append(name.name)
+        parts = [p for p in (name.first_name, name.last_name) if p]
+        if parts:
+            names.append(" ".join(parts))
+    return names
+
+async def send_message_from_tg(chat_recipient: str, media: dict | None, text: str, client: Client) -> None:
+    my_id = client.me.contact.id if client.me else None
+    
     chats = await client.fetch_chats()
-    print(f"Fetched chats {len(chats)}")
 
     for chat in chats:
-        title = await client.get_user(chat.id)
-        print(f"Checking chat.id: {chat.id}, chat.title: {title}")
-        if  await client.get_user(chat.id) == chat_recipient:
-            await client.send_message(chat.id, message)
-            print(f"Sent message to chat {chat_recipient}")
+        chat_title = chat.title
+        
+        chat_type = str(getattr(chat, "type", ""))
+        is_dialog = chat_type in ("DIALOG", "ChatType.DIALOG")
+
+        if is_dialog:
+            user_id = [uid for uid in chat.participants.keys() if uid != my_id]
+            if user_id:
+                user = await client.get_user(user_id[0]) if user_id else None
+                debug_log(f"User ID: {user_id}, User: {user}")
+                try:
+                    full_names = _get_name(user)
+                    for full_name in full_names:
+                        if full_name == chat_recipient:
+                            debug_log (f"{full_name} \n")
+                            chat_title = full_name
+                            break
+                        else:
+                            continue
+                except Exception as e:
+                    debug_log(f"Error {e}")
+        debug_log(f"Checking chat.id: {chat.id}, chat.title: {chat_title} \n")
+        if chat_title == chat_recipient and (media or len(text) > 0):
+            for key, value in (media or {}).items():
+                if key == "photo":
+                    media_file = Photo(path=Path(value))
+                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+                elif key == "video":
+                    media_file = Video(path=Path(value))
+                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+                elif key == "document":
+                    media_file = File(path=Path(value))
+                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+                elif key == "voice":
+                    media_file = Voice(path=Path(value))
+                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+            if len(text) > 0:
+                await client.send_message(chat_id=chat.id, text=text)
+            debug_log(f"Sent message to chat {chat_recipient}")
             return
 
-    print(f"Chat with title {chat_recipient} was not found")
+    debug_log(f"Chat with title {chat_recipient} was not found")
