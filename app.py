@@ -71,6 +71,7 @@ async def download_message_attachments(
     }
 
     for index, attach in enumerate(attach_list):
+        debug_log(f'attach: {attach}')
         # Photo handler
         if isinstance(attach, PhotoAttachment):
             path = folder / f"photo_{attach.photo_id}.jpg"
@@ -221,6 +222,8 @@ async def main() -> None:
             user = await client.get_user(message.sender)
             sender_name = get_user_display_name(user)
         text = message.text or ""
+        if text in ["Василиса,  отправь плиз в чат. Спс", "Василиса, отправь плиз в общий чат! Спасибо", "Не все еще зашли в Приложение МЭШ Колледж! Заходим пожалуйста", "👍"]:
+            return
         summary = {
             "message": str(message),
             "sender": sender_name,
