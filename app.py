@@ -237,10 +237,26 @@ async def main() -> None:
         await send_to_telegram(summary)
 
 
+    try:
+        await client.start()
+        await client.idle()
+    except RuntimeError as error:
+        if "Failed to dispatch inbound frame" in str(error):
+            logging.error(f"Обнаружен критический баг валидации библиотеки: {error}")
+            logging.error("Вызываем принудительное завершение процесса. Systemd чисто перезапустит службу.")
+            
+            for task in _background_tasks:
+                task.cancel()
+            await asyncio.sleep(1)  # Give cancelled tasks a chance to exit gracefully
+            import sys
+            sys.exit(1)
+        else:
 
-    await client.start()
-    await client.idle()
-
+            raise error
+    except Exception as error:
+        logging.exception(f"Непредвиденная критическая ошибка приложения: {error}")
+        import sys
+        sys.exit(1)
 
 if __name__ == "__main__":
     asyncio.run(main())
