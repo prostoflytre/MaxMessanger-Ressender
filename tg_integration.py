@@ -1,3 +1,5 @@
+"""Helpers for resolving Max chats and sending Telegram-originated content."""
+
 from pathlib import Path
 from pymax import Client, Photo, Video, File, Voice
 
@@ -5,6 +7,7 @@ from debug import debug_log
 
 # Helper function to extract full names from a Max user object
 def _get_name(user) -> list[str]:
+    """Collect full-name variants exposed by a Max user object."""
     names = []
     if user is None:
         return names
@@ -18,6 +21,7 @@ def _get_name(user) -> list[str]:
 
 # Function to send a message from Telegram to a specified chat recipient
 async def send_message_from_tg(chat_recipient: str, media: dict | None, text: str, client: Client) -> None:
+    """Find a recipient chat and forward its media and text content."""
     my_id = client.me.contact.id if client.me else None # Get the current user's ID
     
     chats = await client.fetch_chats() # Fetch all chats for the current user
