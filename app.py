@@ -1,3 +1,5 @@
+"""Max client entry point and attachment forwarding handlers."""
+
 import asyncio
 import json
 import os, gzip
@@ -27,6 +29,7 @@ _aiohttp_connector._SSL_CONTEXT_VERIFIED = ssl.create_default_context(cafile=cer
 
 # get env data, with output in console if missing
 def get_env(name: str, required: bool = True, default: str | None = None) -> str | None:
+    """Read an environment variable and exit when a required value is missing."""
     value = os.getenv(name, default)
     if required and not value:
         debug_log(f"Missing required env var: {name}, check .env file")
@@ -34,6 +37,7 @@ def get_env(name: str, required: bool = True, default: str | None = None) -> str
     return value
 
 async def download_url(url: str, destination: Path) -> None:
+    """Download a URL to a local file using streamed response chunks."""
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     async with aiohttp.ClientSession() as session:
@@ -51,6 +55,7 @@ async def download_message_attachments(
     client: Client,
     output_dir: str = "downloads",
 ) -> dict:
+    """Download message attachments and return their local paths by type."""
     if message.chat_id is None:
         debug_log("У сообщения нет chat_id — получить URL видео/файла нельзя.")
         return {}
@@ -105,7 +110,7 @@ async def download_message_attachments(
                 
                 path_list["sticker"].append(str(path.resolve()))
             else:
-                sticker = "".join([emoji for emoji in attach.tags])
+                sticker = "".join(attach.tags or [])
                 path_list["sticker_emoji"].append(sticker)
                 debug_log(f"Sticker without lottie_url: {sticker}")
 
@@ -150,6 +155,7 @@ async def download_message_attachments(
 
 # get user display name from message
 def get_user_display_name(user: object | None) -> str:
+    """Return the first available display name from a Max user object."""
     if not user:
         return ""
     for name in user.names:
@@ -163,6 +169,7 @@ def get_user_display_name(user: object | None) -> str:
 
 # Create Client and start it
 def build_client() -> Client:
+    """Create a Max client from the configured account and device settings."""
     phone = get_env("MAX_PHONE")
     session_name = get_env("MAX_SESSION", default="session.db")
     token = get_env("MAX_TOKEN", required=False)
@@ -181,6 +188,7 @@ def build_client() -> Client:
 
 # Entry point for the application
 async def main() -> None:
+    """Start the Max client and relay incoming messages to Telegram."""
 
     # Load environment variables from .env file
     load_dotenv()
@@ -197,6 +205,7 @@ async def main() -> None:
 
 
     async def run_max_tg_listener(client: Client) -> None:
+        """Keep the Telegram message listener running and restart on errors."""
         # keep listening forever, restarting the listener if it exits or errors
         while True:
             try:
@@ -207,16 +216,23 @@ async def main() -> None:
                 logging.exception("get_tg_message crashed, restarting")
             await asyncio.sleep(1)
 
+    tg_listener_task: asyncio.Task | None = None
+
     @client.on_start()
     async def on_start(client: Client) -> None:
-        
-        tg_message_task = asyncio.create_task(run_max_tg_listener(client=client))
-        _background_tasks.add(tg_message_task)
-        tg_message_task.add_done_callback(_background_tasks.discard)
+        """Start the Redis-to-Max listener once; pymax fires on_start on every reconnect too."""
+        nonlocal tg_listener_task
+        if tg_listener_task is not None and not tg_listener_task.done():
+            return
+
+        tg_listener_task = asyncio.create_task(run_max_tg_listener(client=client))
+        _background_tasks.add(tg_listener_task)
+        tg_listener_task.add_done_callback(_background_tasks.discard)
 
 
     @client.on_message()
     async def handle_message(message: Message, client: Client) -> None:
+        """Serialize a Max message and publish it for Telegram delivery."""
         sender_name = None
         if message.sender: # if the message has a sender get the user details
             user = await client.get_user(message.sender)
