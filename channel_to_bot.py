@@ -1,4 +1,4 @@
-"""Redis bridge for forwarding messages between Telegram and Max."""
+# -- Redis bridge for forwarding messages between Telegram and Max.
 
 import asyncio
 import os
@@ -18,14 +18,14 @@ if debug_channels():
     max_channel += "_debug"
 
 async def send_to_telegram(message: str) -> None:
-    """Publish a serialized Telegram message to the Max-bound Redis channel."""
+    # * Publish a serialized Telegram message to the Max-bound Redis channel.
     redis_client = aioredis.from_url(redis_url)
     await redis_client.publish(max_channel, message)
     debug_log(f"Published message to {max_channel}: {message}")
     await redis_client.close()
 
 async def get_tg_message(client) -> None:
-    """Listen for Telegram payloads and forward valid messages to Max."""
+    # * Listen for Telegram payloads and forward valid messages to Max.
     redis_client = aioredis.from_url(redis_url, decode_responses=True)
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(tg_channel)
