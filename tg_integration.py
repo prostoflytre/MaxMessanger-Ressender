@@ -56,8 +56,12 @@ async def send_message_from_tg(chat_recipient: str, media: dict | None, text: st
             # Send media files if any are provided
             for key, value in (media or {}).items():
                 if key == "photo":
-                    media_file = Photo(path=Path(value))
-                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    try:
+                        await client.send_message(chat_id=chat.id, attachments=[Photo(path=Path(value))])
+                    except Exception as e:
+                        # Max's photo upload URL format may lack photoIds (pymax bug); send as a file instead
+                        debug_log(f"Photo upload failed ({e}), falling back to file")
+                        await client.send_message(chat_id=chat.id, attachments=[File(path=Path(value))])
                     Path(value).unlink(missing_ok=True)
                 elif key == "video":
                     media_file = Video(path=Path(value))
