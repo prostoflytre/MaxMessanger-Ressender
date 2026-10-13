@@ -175,8 +175,9 @@ def build_client() -> Client:
     token = get_env("MAX_TOKEN", required=False)
     work_dir = get_env("MAX_WORK_DIR", default=".")
     device_type = get_env("MAX_DEVICE_TYPE", default="DESKTOP")
-
+    app_version = get_env("MAX_APP_VERSION", default="26.35.0")
     client = Client(
+        app_version=app_version,
         phone=phone,
         session_name=session_name,
         work_dir=work_dir,
