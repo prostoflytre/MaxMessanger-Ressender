@@ -13,6 +13,7 @@ import aiohttp
 import aiohttp.connector as _aiohttp_connector
 import certifi
 from pymax import ExtraConfig
+from pymax.versions.catalog import VersionCatalog
 from pymax.types import PhotoAttachment, VideoAttachment, AudioAttachment, StickerAttachment, FileAttachment
 from dotenv import load_dotenv
 from debug import debug_log
@@ -178,6 +179,7 @@ def build_client() -> Client:
     app_version = get_env("MAX_APP_VERSION", default="26.35.0")
     client = Client(
         app_version=app_version,
+        catalog=VersionCatalog(remote=True),
         phone=phone,
         session_name=session_name,
         work_dir=work_dir,
