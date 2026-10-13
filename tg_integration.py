@@ -1,4 +1,4 @@
-"""Helpers for resolving Max chats and sending Telegram-originated content."""
+# -- Helpers for resolving Max chats and sending Telegram-originated content.   
 
 from pathlib import Path
 from pymax import Client, Photo, Video, File, Voice
@@ -7,7 +7,7 @@ from debug import debug_log
 
 # Helper function to extract full names from a Max user object
 def _get_name(user) -> list[str]:
-    """Collect full-name variants exposed by a Max user object."""
+    # * Collect full-name variants exposed by a Max user object.
     names = []
     if user is None:
         return names
@@ -21,7 +21,7 @@ def _get_name(user) -> list[str]:
 
 # Function to send a message from Telegram to a specified chat recipient
 async def send_message_from_tg(chat_recipient: str, media: dict | None, text: str, client: Client) -> None:
-    """Find a recipient chat and forward its media and text content."""
+    # * Find a recipient chat and forward its media and text content.
     my_id = client.me.contact.id if client.me else None # Get the current user's ID
     
     chats = await client.fetch_chats() # Fetch all chats for the current user
@@ -56,8 +56,12 @@ async def send_message_from_tg(chat_recipient: str, media: dict | None, text: st
             # Send media files if any are provided
             for key, value in (media or {}).items():
                 if key == "photo":
-                    media_file = Photo(path=Path(value))
-                    await client.send_message(chat_id=chat.id, attachments=[media_file])
+                    try:
+                        await client.send_message(chat_id=chat.id, attachments=[Photo(path=Path(value))])
+                    except Exception as e:
+                        # Max's photo upload URL format may lack photoIds (pymax bug); send as a file instead
+                        debug_log(f"Photo upload failed ({e}), falling back to file")
+                        await client.send_message(chat_id=chat.id, attachments=[File(path=Path(value))])
                     Path(value).unlink(missing_ok=True)
                 elif key == "video":
                     media_file = Video(path=Path(value))
