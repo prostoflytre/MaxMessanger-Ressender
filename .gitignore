@@ -6,4 +6,4 @@ __pycache__/
 *.log
 .env
 session.db
-media/
+downloads/

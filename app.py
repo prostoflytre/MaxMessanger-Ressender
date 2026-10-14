@@ -1,3 +1,5 @@
+# -- Max client entry point and attachment forwarding handlers.
+
 import asyncio
 import gzip
 import json
@@ -10,6 +12,8 @@ from pathlib import Path
 import aiohttp
 import aiohttp.connector as _aiohttp_connector
 from dotenv import load_dotenv
+from debug import debug_log
+
 
 # --- ПАТЧ ОТКЛЮЧЕНИЯ SSL ДЛЯ AIOHTTP И PYMAX ---
 # Отключаем проверку сертификатов для хостов вроде fu2.oneme.ru и omu.okcdn.ru,
@@ -48,9 +52,10 @@ from debug import debug_log
 
 # get env data, with output in console if missing
 def get_env(name: str, required: bool = True, default: str | None = None) -> str | None:
+    # * Read an environment variable and exit when a required value is missing.
     value = os.getenv(name, default)
     if required and not value:
-        print(f"Missing required env var: {name}")
+        debug_log(f"Missing required env var: {name}, check .env file")
         sys.exit(2)
     return value
 
@@ -136,25 +141,13 @@ async def download_message_attachments(
 
         # Video handler
         elif isinstance(attach, VideoAttachment):
-            source_url = await resolve_video_url(
-                client=client,
-                parent_message=parent_message,
-                source_message=source_message,
+            video_info = await client.get_video_by_id(
+                chat_id=message.chat_id,
+                message_id=message.id,
                 video_id=attach.video_id,
             )
-            # If video URL could not be resolved, try using the thumbnail as a preview
-            if not source_url and getattr(attach, "thumbnail", None):
-                source_url = attach.thumbnail
-                media_kind = "video-preview"
-                filename = (
-                    f"video_preview_{getattr(source_message, 'id', 'unknown')}_{attach.video_id}.jpg"
-                )
-            if not source_url:
-                await asyncio.to_thread(
-                    bot.send_message,
-                    chat_id,
-                    f"MAX video не удалось получить (id={attach.video_id}) в этом контексте сообщения.",
-                )
+            if video_info is None:
+                debug_log(f"Video URL was not returned for video_id={attach.video_id}")
                 continue
             if video_info.url:
                 path = folder / f"video_{attach.video_id}.mp4"
@@ -201,13 +194,16 @@ def get_user_display_name(user: object | None) -> str:
 
 # Create Client and start it
 def build_client() -> Client:
+    # * Create a Max client from the configured account and device settings.
     phone = get_env("MAX_PHONE")
-    session_name = os.getenv("MAX_SESSION", "session.db")
-    token = os.getenv("MAX_TOKEN")
-    work_dir = os.getenv("MAX_WORK_DIR", ".")
-    device_type = os.getenv("MAX_DEVICE_TYPE", "DESKTOP")
-
+    session_name = get_env("MAX_SESSION", default="session.db")
+    token = get_env("MAX_TOKEN", required=False)
+    work_dir = get_env("MAX_WORK_DIR", default=".")
+    device_type = get_env("MAX_DEVICE_TYPE", default="DESKTOP")
+    app_version = get_env("MAX_APP_VERSION", default="26.35.0")
     client = Client(
+        app_version=app_version,
+        catalog=VersionCatalog(remote=True),
         phone=phone,
         session_name=session_name,
         work_dir=work_dir,
@@ -219,12 +215,16 @@ def build_client() -> Client:
 
 # Entry point for the application
 async def main() -> None:
+    # * Start the Max client and relay incoming messages to Telegram.
+
+    # Load environment variables from .env file
     load_dotenv()
+    """ 
+    Инициализация Telegram бота
     bot_token = get_env("TELEGRAM_BOT_TOKEN")
     chat_id = get_env("TELEGRAM_CHAT_ID")
     bot = TeleBot(bot_token)
-    source_chat_title = os.getenv("MAX_SOURCE_CHAT_TITLE", "").strip()
-    source_chat_id: int | None = os.getenv("MAX_SOURCE_CHAT_ID")
+    """
 
     client = build_client()
 
@@ -256,10 +256,8 @@ async def main() -> None:
         tg_listener_task.add_done_callback(_background_tasks.discard)
 
     @client.on_message()
-    async def handle_message(message, client: Client) -> None:
-        # Ignore messages from chats other than the source chat
-        if source_chat_id is not None and message.chat_id != source_chat_id:
-            return
+    async def handle_message(message: Message, client: Client) -> None:
+        # * Serialize a Max message and publish it for Telegram delivery.
         sender_name = None
         if message.sender:  # if the message has a sender get the user details
             user = await client.get_user(message.sender)
